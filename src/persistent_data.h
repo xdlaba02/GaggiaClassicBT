@@ -1,14 +1,12 @@
-#ifndef MAIN_H
-#define MAIN_H
+#pragma once
 
 #include <EEPROM.h>
 
 struct PersistentData {
-
-    double target_temp = 0.;
-    double kP          = 0.;
-    double kI          = 0.;
-    double kD          = 0.;
+    float target_temp = 0.;
+    float kP          = 0.;
+    float kI          = 0.;
+    float kD          = 0.;
 
     void load() {
         EEPROM.begin(sizeof(PersistentData));
@@ -20,5 +18,3 @@ struct PersistentData {
         EEPROM.commit();
     }
 };
-
-#endif

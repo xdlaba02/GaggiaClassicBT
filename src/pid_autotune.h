@@ -1,92 +1,90 @@
-#ifndef PID_AUTOTUNE_H
-#define PID_AUTOTUNE_H
+#pragma once
 
 #include <algorithm>
+
 #include <Arduino.h>
 
 class PIDAutotune {
-
     enum PeakType {
         NONE,
         MIN,
         MAX
     };
 
-    double m_noise_band;
-    double m_step;
+    float m_noise_band;
+    float m_step;
 
-    bool m_running;
-    
     PeakType m_current_peak_type;
 
-    double m_out_min;
-    double m_out_max;
+    float m_out_min;
+    float m_out_max;
 
-    static const int m_prev_inputs_size = 100;
-    double m_prev_inputs[m_prev_inputs_size + 1];
+    float m_target;
+    bool m_running;
+
+    static const int m_prev_inputs_size = 20;
+    float m_prev_inputs[m_prev_inputs_size + 1];
     int m_prev_inputs_count;
 
     unsigned long m_prev_peak_time;
     unsigned long m_current_peak_time;
 
-    double m_prev_peak_max;
-    double m_current_peak_min;
-    double m_current_peak_max;
+    float m_prev_peak_max;
+    float m_current_peak_min;
+    float m_current_peak_max;
 
-    double m_kU;
-    double m_tU;
+    float m_kU;
+    float m_tU;
     
 public:
-    void cancel() {
+    void start() {
+        m_current_peak_type = NONE;
+        m_prev_inputs_count = 0;
+        m_prev_peak_time = 0;
+        m_current_peak_time = 0;
+        m_prev_peak_max = 0.f;
+        m_current_peak_min = 0.f;
+        m_current_peak_max = 0.f;
+        m_kU = 0.f;
+        m_running = true;
+    }
+
+    void stop() {
         m_running = false;
     }
 
-    void setNoiseBand(double noise_band) {
+    void setNoiseBand(float noise_band) {
         m_noise_band = noise_band;
     }
 
-    void setStep(double step) {
+    void setStep(float step) {
         m_step = step;
     }
 
-    void setOutputRange(double out_min, double out_max) {
+    void setOutputRange(float out_min, float out_max) {
         m_out_min = out_min;
         m_out_max = out_max;
     }
 
-    void getPID(double &kP, double &kI, double &kD) {
-        kP = 0.6 * m_kU;
-        kI = 1.2 * m_kU / m_tU;
-        kD = 3.0 * m_kU * m_tU / 40.0;
+    void setTarget(float target) {
+        m_target = target;
+    } 
+
+    void getPID(float &kP, float &kI, float &kD) {
+        kP = 0.6f * m_kU;
+        kI = 1.2f * m_kU / m_tU;
+        kD = 3.f * m_kU * m_tU / 40.f;
     }
 
-    bool compute(double input, double target, double &output) {
-        if (!m_running) {
-		    m_running = true;
-    
-            m_current_peak_type = NONE;
-
-            m_prev_inputs_count = 0;
-
-            m_prev_peak_time = 0;
-            m_current_peak_time = 0;
-
-            m_prev_peak_max = 0.0;
-            m_current_peak_min = 0.0;
-            m_current_peak_max = 0.0;
-
-            m_kU = 0.0;
-        }
-
-	    if (input > target + m_noise_band) {
-		    m_kU = std::max(m_kU - m_step, m_out_min);
+    float compute(float input) {
+	    if (input > m_target + m_noise_band) {
+		    m_kU -= m_step;
 	    }
-	    else if (input < target - m_noise_band) {
-	        m_kU = std::min(m_kU + m_step, m_out_max);
+	    else if (input < m_target - m_noise_band) {
+	        m_kU += m_step;
 	    }
 
-        double error = target - input;
-        output = m_kU * error; 
+        float output = std::max(m_out_min, std::min(m_kU * (m_target - input), m_out_max));
 
   	    bool is_max = true;
 	    bool is_min = true;
@@ -101,7 +99,7 @@ public:
 	
   	    if (m_prev_inputs_count < m_prev_inputs_size) {  
             m_prev_inputs_count++;
-		    return false;
+		    return output;
 	    }
 
         if (is_max) {
@@ -117,12 +115,12 @@ public:
         else if (is_min) {
             if (m_current_peak_type == MAX) {
                 if (m_prev_peak_time != 0) {
-                    double average_separation = (std::abs(m_current_peak_max - m_current_peak_min) + std::abs(m_current_peak_min - m_prev_peak_max)) / 2.0;
+                    float average_separation = (m_current_peak_max + m_prev_peak_max) / 2.f - m_current_peak_min;
             
-                    if (average_separation < 2 + m_noise_band) {
-                        m_tU = (m_current_peak_time - m_prev_peak_time) / 1000.0;
+                    if (average_separation < 2.f * m_noise_band) {
+                        m_tU = (m_current_peak_time - m_prev_peak_time) / 1000.f;
                         m_running = false;
-                        return true;
+                        return output;
                     }
                 }
             }
@@ -131,8 +129,10 @@ public:
             m_current_peak_min = input;
         }
 
-        return false;
+        return output;
+    }
+
+    bool running() {
+        return m_running;
     }
 };
-
-#endif

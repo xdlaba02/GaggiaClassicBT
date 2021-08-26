@@ -1,12 +1,10 @@
 #include "persistent_data.h"
+#include "max6675.h"
 #include "pid.h"
+#include "pid_autotune.h"
 
-#include <SPI.h>
-#include <MAX6675.h>
 #include <BLEDevice.h>
-#include <BLEServer.h>
 #include <BLE2902.h>
-#include <esp_system.h>
 
 #include <Arduino.h>
 
@@ -30,17 +28,13 @@ hw_timer_t *pid_loop {};
 
 bool new_temp_ready = true;
 
-double prev_measured_value {};
-double temp_input {};
-double PID_output {};
-
-double proportional {};
-double integral     {};
-double derivative  {};
+float temp_input {};
+float PID_output {};
 
 PersistentData persistent_data {};
 
 PID myPID {};
+PIDAutotune autotune {};
 
 unsigned long heatingWindowStartTime {};
 
@@ -56,6 +50,7 @@ class BTServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer *) {
       deviceConnected = true;
     };
+    
     void onDisconnect(BLEServer *) {
       deviceConnected = false;
     }
@@ -65,17 +60,28 @@ class KPIDCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *receiveCharacteristic) {
       std::string msg = receiveCharacteristic->getValue();
 
-      double kP {};
-      double kI {};
-      double kD {};
+      float kP {};
+      float kI {};
+      float kD {};
 
       if (std::stringstream(msg) >> kP >> kI >> kD) {
-        persistent_data.kP = kP;
-        persistent_data.kI = kI;
-        persistent_data.kD = kD;
-        persistent_data.save();
+        if (kP == 0.f && kI == 0.f && kD == 0.f) {
+          if (autotune.running()) {
+            autotune.stop();
+            myPID.restart();
+          }
+          else {
+            autotune.start();
+          }
+        }
+        else {
+          persistent_data.kP = kP;
+          persistent_data.kI = kI;
+          persistent_data.kD = kD;
+          persistent_data.save();
 
-        myPID.setTunings(persistent_data.kP, persistent_data.kI, persistent_data.kD);
+          myPID.setTunings(persistent_data.kP, persistent_data.kI, persistent_data.kD);
+        }
       }
 
       kPIDCharacteristic->notify();
@@ -96,11 +102,14 @@ class TargetCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *receiveCharacteristic) {
       std::string msg = receiveCharacteristic->getValue();
     
-        double val {};
+        float val {};
         if (std::stringstream(msg) >> val) {
           if (val >= 0.0 && val <= 150.0) {
             persistent_data.target_temp = val;
             persistent_data.save();
+
+            myPID.setTarget(persistent_data.target_temp);
+            autotune.setTarget(persistent_data.target_temp);
           }
         }
 
@@ -122,10 +131,10 @@ class TempCallbacks: public BLECharacteristicCallbacks {
     void onRead(BLECharacteristic *sendCharacteristic) {
       std::stringstream msg {};
       msg << temp_input << " " 
-          << proportional / HEATING_WINDOW << " " 
-          << integral / HEATING_WINDOW << " " 
-          << derivative  / HEATING_WINDOW << " " 
-          << PID_output / HEATING_WINDOW << " "
+          << myPID.proportional() / HEATING_WINDOW << " " 
+          << myPID.integral()     / HEATING_WINDOW << " " 
+          << myPID.derivative()   / HEATING_WINDOW << " " 
+          << PID_output           / HEATING_WINDOW << " "
           << millis() / 1000.0;
 
       sendCharacteristic->setValue(msg.str());
@@ -146,7 +155,6 @@ void IRAM_ATTR newTempReady() {
   new_temp_ready = true;
 }
 
-
 void setup() {
   pinMode(RELAY_OUTPUT, OUTPUT);
   pinMode(RELAY_GROUND, OUTPUT);
@@ -156,7 +164,12 @@ void setup() {
   persistent_data.load();
 
   myPID.setTunings(persistent_data.kP, persistent_data.kI, persistent_data.kD);
+  myPID.setTarget(persistent_data.target_temp);
   myPID.setOutputRange(0, HEATING_WINDOW);
+
+  autotune.setNoiseBand(1.f);
+  autotune.setStep(HEATING_WINDOW / 40);
+  autotune.setOutputRange(0, HEATING_WINDOW);
 
   BLEDevice::init("Gaggia Classic BT");
 
@@ -192,25 +205,40 @@ void setup() {
   timerAlarmEnable(pid_loop);
 }
 
+void updateRelay(float output) {
+  
+}
+
 void loop() {
   timerWrite(watchdog, 0);
 
-  if (persistent_data.target_temp < 0.0) {
+  if (persistent_data.target_temp <= 0.0) {
     digitalWrite(RELAY_OUTPUT, LOW);
   }
   else {
     if (new_temp_ready) {
-      double measured_value = thermocouple.readTempC();
+      temp_input = thermocouple.readTempC();
 
-      temp_input = (measured_value + prev_measured_value) / 2;
-      prev_measured_value = measured_value;
-      
       if (std::isnan(temp_input) || (temp_input < 0.0)) {
-        temp_input = std::numeric_limits<double>::infinity();
+        temp_input = std::numeric_limits<float>::infinity();
       }
 
-      PID_output = myPID.compute(temp_input, persistent_data.target_temp, proportional, integral, derivative);
+      if (autotune.running()) {
+        PID_output = autotune.compute(temp_input);
 
+        if (!autotune.running()) {
+          autotune.getPID(persistent_data.kP, persistent_data.kI, persistent_data.kD);
+          persistent_data.save();
+          kPIDCharacteristic->notify();
+
+          myPID.setTunings(persistent_data.kP, persistent_data.kI, persistent_data.kD);
+          myPID.restart();
+        }
+      }
+      else {
+        PID_output = myPID.compute(temp_input);
+      }
+      
       if (deviceConnected) {
         tempCharacteristic->notify();  
       }
